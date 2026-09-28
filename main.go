@@ -3,7 +3,9 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/gin-gonic/gin"
 	"net/http"
+	"strconv"
 )
 
 const (
@@ -82,6 +84,8 @@ func main() {
 		{ID: 1, EventID: 101, Status: StatusAvailable},
 		{ID: 2, EventID: 101, Status: StatusAvailable},
 	}
+	nextSeatID := uint(3)
+
 	held := false
 	found := false
 
@@ -177,9 +181,93 @@ func main() {
 		}
 	})
 
-	handler := http.HandlerFunc(rootHandler)
-	mux.Handle("/", handler)
+	router := gin.New()
 
-	fmt.Println("Server is Running on :8080")
-	http.ListenAndServe(":8080", mux)
+	router.POST("/events", func(c *gin.Context) {
+		var input CreateEventRequest
+
+		if err := c.ShouldBindJSON(&input); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "Invalid JSON",
+			})
+			return
+		}
+		if input.Name == "" {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "Name is required",
+			})
+			return
+		}
+
+		newEvent := Event{
+			ID:   nextEventID,
+			Name: input.Name,
+		}
+		nextEventID++
+		events = append(events, newEvent)
+		c.JSON(http.StatusCreated, newEvent)
+	})
+	router.GET("/events/:id", func(c *gin.Context) {
+		idText := c.Param("id")
+
+		id, err := strconv.ParseUint(idText, 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "Invalid event ID",
+			})
+			return
+		}
+		for _, event := range events {
+			if event.ID == uint(id) {
+				c.JSON(http.StatusOK, event)
+				return
+			}
+		}
+		c.JSON(http.StatusNotFound, gin.H{
+			"error": "Event not found",
+		})
+	})
+	router.POST("/events/:id/seats", func(c *gin.Context) {
+		idText := c.Param("id")
+
+		eventID, err := strconv.ParseUint(idText, 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid event ID"})
+			return
+		}
+		eventFound := false
+
+		for _, event := range events {
+			if event.ID == uint(eventID) {
+				eventFound = true
+				break
+			}
+		}
+		if !eventFound {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Event not found"})
+			return
+		}
+		newSeat := Seat{
+			ID:      nextSeatID,
+			EventID: uint(eventID),
+			Status:  StatusAvailable,
+		}
+
+		nextSeatID++
+		seats = append(seats, newSeat)
+
+		c.JSON(http.StatusCreated, newSeat)
+
+	})
+
+	router.GET("/", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"message": "SeatRush api is running",
+		})
+	})
+	router.GET("/events", func(c *gin.Context) {
+		c.JSON(http.StatusOK, events)
+	})
+	fmt.Println("Gin server is running on :8080")
+	router.Run(":8080")
 }
