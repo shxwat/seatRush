@@ -1,11 +1,11 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
-	"github.com/gin-gonic/gin"
 	"net/http"
 	"strconv"
+
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -43,22 +43,10 @@ type CreateEventRequest struct {
 	Name string `json:"name"`
 }
 
-func rootHandler(w http.ResponseWriter, r *http.Request) {
-	fmt.Println("Method:", r.Method)
-	fmt.Println("Path", r.URL.Path)
-
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-
-	json.NewEncoder(w).Encode(map[string]string{
-		"message": "SeatRush API is running",
-	})
-
+type CreateReservationRequest struct {
+	UserID uint `json:"user_id"`
+	EventID uint `json:"event_id"`
+	SeatID uint `json:"seat_id"`
 }
 
 func main() {
@@ -86,102 +74,82 @@ func main() {
 	}
 	nextSeatID := uint(3)
 
-	held := false
-	found := false
-
-	requestedSeatID := uint(1)
-	for i := range seats {
-		if seats[i].ID == requestedSeatID {
-			found = true
-
-			if seats[i].Status == StatusAvailable {
-				seats[i].Status = StatusHeld
-				held = true
-			}
-
-		}
-	}
-	fmt.Println("Found:", found)
-	fmt.Println("Held:", held)
 	reservations := []Reservation{}
+	nextReservationID := uint(501)
 
-	if !found {
-		fmt.Println("Reservation failed: Seat not found")
-	} else if !held {
-		fmt.Println("Reservation Failed: Seat unavailable")
-	} else {
+	//routes
 
-		reservation := Reservation{
-			ID:      501,
-			UserID:  user.ID,
-			EventID: event.ID,
-			SeatID:  requestedSeatID,
-			Status:  ReservationStatusPending,
+	router := gin.New()
+
+	router.POST("/reservations", func(c *gin.Context){
+		var input CreateReservationRequest
+
+		if err := c.ShouldBindJSON(&input); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "Invalid JSON",
+			})
+			return
 		}
-		reservations = append(reservations, reservation)
-
-		fmt.Println("Reservation: ", reservation)
+		seatFound := false
+		seatHeld := false
 
 		for i := range seats {
-			if seats[i].ID == reservation.SeatID && seats[i].Status == StatusHeld {
-				seats[i].Status = StatusBooked
+			if seats[i].ID == input.SeatID && seats[i].EventID == input.EventID {
+				seatFound = true
+
+				if seats[i].Status == StatusAvailable {
+					seats[i].Status = StatusHeld
+					seatHeld = true
+				}
+				break
 			}
 		}
-		reservations[len(reservations)-1].Status = ReservationStatusConfirmed
+		fmt.Println("Seat found", seatFound)
+		fmt.Println("Seat held", seatHeld)
 
-	}
-
-	fmt.Println("Reservations:", reservations)
-	fmt.Println("Seats:", seats)
-
-	fmt.Println(seats)
-	fmt.Println(len(seats))
-	fmt.Println(seats[0].Status)
-
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("/seats", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		if !seatFound {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "Seat not found",
+			})
+			return
+		}
+		if !seatHeld {
+			c.JSON(http.StatusConflict, gin.H{
+				"error": "Seat unavailable",
+			})
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(seats)
-	})
-	mux.HandleFunc("/events", func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(events)
-		case http.MethodPost:
-			var input CreateEventRequest
-
-			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-				http.Error(w, "Invalid JSON", http.StatusBadRequest)
-				return
-			}
-			if input.Name == "" {
-				http.Error(w, "Name is required", http.StatusBadRequest)
-				return
-			}
-
-			newEvent := Event{
-				ID:   nextEventID,
-				Name: input.Name,
-			}
-			nextEventID++
-			events = append(events, newEvent)
-
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusCreated)
-			json.NewEncoder(w).Encode(newEvent)
-		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		reservation := Reservation{
+			ID:      nextReservationID,
+			UserID:  input.UserID,
+			EventID: input.EventID,
+			SeatID:  input.SeatID,
+			Status:  ReservationStatusPending,
 		}
+		nextReservationID++
+		reservations = append(reservations, reservation)
+
+		c.JSON(http.StatusCreated, reservation)
 	})
 
-	router := gin.New()
+	router.GET("/reservations/:id", func(c *gin.Context){
+		idText := c.Param("id")
+
+		id, err := strconv.ParseUint(idText, 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid reservation ID"})
+			return
+		}
+		for _, reservation := range reservations {
+			if reservation.ID == uint(id){
+				c.JSON(http.StatusOK, reservation)
+				return
+			}
+		}
+
+		c.JSON(http.StatusNotFound, gin.H{"error": "Reservation not found"})
+	})
 
 	router.POST("/events", func(c *gin.Context) {
 		var input CreateEventRequest
@@ -258,6 +226,35 @@ func main() {
 
 		c.JSON(http.StatusCreated, newSeat)
 
+	})
+	router.GET("/events/:id/seats", func(c *gin.Context){
+		idText := c.Param("id")
+
+		eventID, err := strconv.ParseUint(idText, 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid event id"})
+			return
+		}
+		eventFound := false
+
+		for _, event := range events{
+			if event.ID == uint(eventID){
+				eventFound = true
+				break
+			}
+		}
+		if!eventFound {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Event not found"})
+			return
+		}
+		eventSeats := []Seat{}
+
+		for _, seat := range seats {
+			if seat.EventID == uint(eventID){
+				eventSeats = append(eventSeats, seat)
+			}
+		}
+		c.JSON(http.StatusOK, eventSeats)
 	})
 
 	router.GET("/", func(c *gin.Context) {
