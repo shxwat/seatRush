@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 )
@@ -44,44 +45,25 @@ type CreateEventRequest struct {
 }
 
 type CreateReservationRequest struct {
-	UserID uint `json:"user_id"`
+	UserID  uint `json:"user_id"`
 	EventID uint `json:"event_id"`
-	SeatID uint `json:"seat_id"`
+	SeatID  uint `json:"seat_id"`
 }
 
-func main() {
-	fmt.Println("Welcome to SeatRush")
+type App struct {
+	events            []Event
+	seats             []Seat
+	reservations      []Reservation
+	nextEventID       uint
+	nextSeatID        uint
+	nextReservationID uint
+	mu                sync.RWMutex
+}
 
-	event := Event{
-		ID:   101,
-		Name: "Tech Conference",
-	}
-	user := User{
-		ID:    1,
-		Name:  "John",
-		Email: "John@gmail.com",
-	}
-
-	fmt.Println("Users:", user)
-	fmt.Println(event)
-
-	events := []Event{event}
-	nextEventID := uint(102)
-
-	seats := []Seat{
-		{ID: 1, EventID: 101, Status: StatusAvailable},
-		{ID: 2, EventID: 101, Status: StatusAvailable},
-	}
-	nextSeatID := uint(3)
-
-	reservations := []Reservation{}
-	nextReservationID := uint(501)
-
-	//routes
-
+func (app *App) setupRouter() *gin.Engine {
 	router := gin.New()
 
-	router.POST("/reservations", func(c *gin.Context){
+	router.POST("/reservations", func(c *gin.Context) {
 		var input CreateReservationRequest
 
 		if err := c.ShouldBindJSON(&input); err != nil {
@@ -93,17 +75,31 @@ func main() {
 		seatFound := false
 		seatHeld := false
 
-		for i := range seats {
-			if seats[i].ID == input.SeatID && seats[i].EventID == input.EventID {
+		app.mu.Lock()
+		for i := range app.seats {
+			if app.seats[i].ID == input.SeatID && app.seats[i].EventID == input.EventID {
 				seatFound = true
 
-				if seats[i].Status == StatusAvailable {
-					seats[i].Status = StatusHeld
+				if app.seats[i].Status == StatusAvailable {
+					app.seats[i].Status = StatusHeld
 					seatHeld = true
 				}
 				break
 			}
 		}
+		var reservation Reservation
+		if seatHeld {
+			reservation = Reservation{
+				ID:      app.nextReservationID,
+				UserID:  input.UserID,
+				EventID: input.EventID,
+				SeatID:  input.SeatID,
+				Status:  ReservationStatusPending,
+			}
+			app.nextReservationID++
+			app.reservations = append(app.reservations, reservation)
+		}
+		app.mu.Unlock()
 		fmt.Println("Seat found", seatFound)
 		fmt.Println("Seat held", seatHeld)
 
@@ -120,20 +116,10 @@ func main() {
 			return
 		}
 
-		reservation := Reservation{
-			ID:      nextReservationID,
-			UserID:  input.UserID,
-			EventID: input.EventID,
-			SeatID:  input.SeatID,
-			Status:  ReservationStatusPending,
-		}
-		nextReservationID++
-		reservations = append(reservations, reservation)
-
 		c.JSON(http.StatusCreated, reservation)
 	})
 
-	router.GET("/reservations/:id", func(c *gin.Context){
+	router.GET("/reservations/:id", func(c *gin.Context) {
 		idText := c.Param("id")
 
 		id, err := strconv.ParseUint(idText, 10, 64)
@@ -141,8 +127,10 @@ func main() {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid reservation ID"})
 			return
 		}
-		for _, reservation := range reservations {
-			if reservation.ID == uint(id){
+		app.mu.RLock()
+		defer app.mu.RUnlock()
+		for _, reservation := range app.reservations {
+			if reservation.ID == uint(id) {
 				c.JSON(http.StatusOK, reservation)
 				return
 			}
@@ -167,12 +155,15 @@ func main() {
 			return
 		}
 
+		app.mu.Lock()
+		defer app.mu.Unlock()
+
 		newEvent := Event{
-			ID:   nextEventID,
+			ID:   app.nextEventID,
 			Name: input.Name,
 		}
-		nextEventID++
-		events = append(events, newEvent)
+		app.nextEventID++
+		app.events = append(app.events, newEvent)
 		c.JSON(http.StatusCreated, newEvent)
 	})
 	router.GET("/events/:id", func(c *gin.Context) {
@@ -185,7 +176,9 @@ func main() {
 			})
 			return
 		}
-		for _, event := range events {
+		app.mu.RLock()
+		defer app.mu.RUnlock()
+		for _, event := range app.events {
 			if event.ID == uint(id) {
 				c.JSON(http.StatusOK, event)
 				return
@@ -203,9 +196,11 @@ func main() {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid event ID"})
 			return
 		}
+		app.mu.Lock()
+		defer app.mu.Unlock()
 		eventFound := false
 
-		for _, event := range events {
+		for _, event := range app.events {
 			if event.ID == uint(eventID) {
 				eventFound = true
 				break
@@ -216,18 +211,18 @@ func main() {
 			return
 		}
 		newSeat := Seat{
-			ID:      nextSeatID,
+			ID:      app.nextSeatID,
 			EventID: uint(eventID),
 			Status:  StatusAvailable,
 		}
 
-		nextSeatID++
-		seats = append(seats, newSeat)
+		app.nextSeatID++
+		app.seats = append(app.seats, newSeat)
 
 		c.JSON(http.StatusCreated, newSeat)
 
 	})
-	router.GET("/events/:id/seats", func(c *gin.Context){
+	router.GET("/events/:id/seats", func(c *gin.Context) {
 		idText := c.Param("id")
 
 		eventID, err := strconv.ParseUint(idText, 10, 64)
@@ -235,22 +230,24 @@ func main() {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid event id"})
 			return
 		}
+		app.mu.RLock()
+		defer app.mu.RUnlock()
 		eventFound := false
 
-		for _, event := range events{
-			if event.ID == uint(eventID){
+		for _, event := range app.events {
+			if event.ID == uint(eventID) {
 				eventFound = true
 				break
 			}
 		}
-		if!eventFound {
+		if !eventFound {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Event not found"})
 			return
 		}
 		eventSeats := []Seat{}
 
-		for _, seat := range seats {
-			if seat.EventID == uint(eventID){
+		for _, seat := range app.seats {
+			if seat.EventID == uint(eventID) {
 				eventSeats = append(eventSeats, seat)
 			}
 		}
@@ -263,8 +260,30 @@ func main() {
 		})
 	})
 	router.GET("/events", func(c *gin.Context) {
-		c.JSON(http.StatusOK, events)
+		app.mu.RLock()
+		defer app.mu.RUnlock()
+
+		c.JSON(http.StatusOK, app.events)
 	})
-	fmt.Println("Gin server is running on :8080")
-	router.Run(":8080")
+	return router
+}
+
+func main() {
+	app := &App{
+		events: []Event{
+			{ID: 101, Name: "Tech Conference"},
+		},
+		seats: []Seat{
+			{ID: 1, EventID: 101, Status: StatusAvailable},
+			{ID: 2, EventID: 101, Status: StatusAvailable},
+		},
+		reservations:      []Reservation{},
+		nextEventID:       102,
+		nextSeatID:        3,
+		nextReservationID: 501,
+	}
+
+	if err := app.setupRouter().Run(":8080"); err != nil {
+		panic(err)
+	}
 }
