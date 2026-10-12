@@ -4,42 +4,28 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"sync"
 
 	"github.com/gin-gonic/gin"
+	"seatrush/internal/domain"
+	"seatrush/internal/repository"
+)
+
+type Seat = domain.Seat
+type Event = domain.Event
+type User = domain.User
+type Reservation = domain.Reservation
+
+const (
+	StatusAvailable = domain.StatusAvailable
+	StatusHeld      = domain.StatusHeld
+	StatusBooked    = domain.StatusBooked
 )
 
 const (
-	StatusAvailable = "AVAILABLE"
-	StatusHeld      = "HELD"
-	StatusBooked    = "BOOKED"
+	ReservationStatusPending   = domain.ReservationStatusPending
+	ReservationStatusConfirmed = domain.ReservationStatusConfirmed
 )
 
-const ReservationStatusPending = "PENDING"
-const ReservationStatusConfirmed = "CONFIRMED"
-
-type Seat struct {
-	ID      uint
-	EventID uint
-	Status  string
-}
-
-type Event struct {
-	ID   uint
-	Name string
-}
-type User struct {
-	ID    uint
-	Name  string
-	Email string
-}
-type Reservation struct {
-	ID      uint
-	UserID  uint
-	EventID uint
-	SeatID  uint
-	Status  string
-}
 type CreateEventRequest struct {
 	Name string `json:"name"`
 }
@@ -50,32 +36,148 @@ type CreateReservationRequest struct {
 	SeatID  uint `json:"seat_id"`
 }
 
-func holdSeat(mu *sync.RWMutex, seats []Seat, reservations *[]Reservation, nextReservationID *uint, input CreateReservationRequest) (bool, Reservation) {
-	mu.Lock()
-	defer mu.Unlock()
+func setupRouter(events []Event, seats []Seat, reservations []Reservation, nextEventID, nextSeatID, nextReservationID uint) *gin.Engine {
+	repo := repository.NewMemoryRepository(
+		events,
+		seats,
+		reservations,
+		nextEventID,
+		nextSeatID,
+		nextReservationID,
+	)
+	router := gin.New()
 
-	for i := range seats {
-		if seats[i].ID != input.SeatID || seats[i].EventID != input.EventID {
-			continue
+	router.POST("/reservations", func(c *gin.Context) {
+		var input CreateReservationRequest
+
+		if err := c.ShouldBindJSON(&input); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "Invalid JSON",
+			})
+			return
 		}
-		if seats[i].Status != StatusAvailable {
-			return true, Reservation{}
+		seatFound, reservation := repo.HoldSeat(
+			input.UserID,
+			input.EventID,
+			input.SeatID,
+		)
+
+		if !seatFound {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "Seat not found",
+			})
+			return
+		}
+		if reservation.ID == 0 {
+			c.JSON(http.StatusConflict, gin.H{
+				"error": "Seat unavailable",
+			})
+			return
 		}
 
-		seats[i].Status = StatusHeld
-		reservation := Reservation{
-			ID:      *nextReservationID,
-			UserID:  input.UserID,
-			EventID: input.EventID,
-			SeatID:  input.SeatID,
-			Status:  ReservationStatusPending,
-		}
-		*nextReservationID = *nextReservationID + 1
-		*reservations = append(*reservations, reservation)
-		return true, reservation
-	}
+		c.JSON(http.StatusCreated, reservation)
+	})
 
-	return false, Reservation{}
+	router.GET("/reservations/:id", func(c *gin.Context) {
+		idText := c.Param("id")
+
+		id, err := strconv.ParseUint(idText, 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid reservation ID"})
+			return
+		}
+		foundReservation, found := repo.GetReservationByID(uint(id))
+		if found {
+			c.JSON(http.StatusOK, foundReservation)
+			return
+		}
+
+		c.JSON(http.StatusNotFound, gin.H{"error": "Reservation not found"})
+	})
+
+	router.POST("/events", func(c *gin.Context) {
+		var input CreateEventRequest
+
+		if err := c.ShouldBindJSON(&input); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "Invalid JSON",
+			})
+			return
+		}
+		if input.Name == "" {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "Name is required",
+			})
+			return
+		}
+
+		newEvent := repo.CreateEvent(input.Name)
+		c.JSON(http.StatusCreated, newEvent)
+	})
+	router.GET("/events/:id", func(c *gin.Context) {
+		idText := c.Param("id")
+
+		id, err := strconv.ParseUint(idText, 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "Invalid event ID",
+			})
+			return
+		}
+		foundEvent, found := repo.GetEventByID(uint(id))
+		if found {
+			c.JSON(http.StatusOK, foundEvent)
+			return
+		}
+		c.JSON(http.StatusNotFound, gin.H{
+			"error": "Event not found",
+		})
+	})
+	router.POST("/events/:id/seats", func(c *gin.Context) {
+		idText := c.Param("id")
+
+		eventID, err := strconv.ParseUint(idText, 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid event ID"})
+			return
+		}
+		_, eventFound := repo.GetEventByID(uint(eventID))
+		if !eventFound {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Event not found"})
+			return
+		}
+		newSeat := repo.AddSeat(uint(eventID))
+
+		c.JSON(http.StatusCreated, newSeat)
+
+	})
+	router.GET("/events/:id/seats", func(c *gin.Context) {
+		idText := c.Param("id")
+
+		eventID, err := strconv.ParseUint(idText, 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid event id"})
+			return
+		}
+		_, eventFound := repo.GetEventByID(uint(eventID))
+		if !eventFound {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Event not found"})
+			return
+		}
+		eventSeats := repo.ListSeatsByEvent(uint(eventID))
+		c.JSON(http.StatusOK, eventSeats)
+	})
+
+	router.GET("/", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"message": "SeatRush api is running",
+		})
+	})
+	router.GET("/events", func(c *gin.Context) {
+		currentEvents := repo.ListEvents()
+		c.JSON(http.StatusOK, currentEvents)
+	})
+	return router
 }
 
 func main() {
@@ -105,199 +207,10 @@ func main() {
 
 	reservations := []Reservation{}
 	nextReservationID := uint(501)
-	var mu sync.RWMutex
+	router := setupRouter(events, seats, reservations, nextEventID, nextSeatID, nextReservationID)
 
-	//routes
-
-	router := gin.New()
-
-	router.POST("/reservations", func(c *gin.Context) {
-		var input CreateReservationRequest
-
-		if err := c.ShouldBindJSON(&input); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": "Invalid JSON",
-			})
-			return
-		}
-		seatFound, reservation := holdSeat(&mu, seats, &reservations, &nextReservationID, input)
-		seatHeld := reservation.ID != 0
-		fmt.Println("Seat found", seatFound)
-		fmt.Println("Seat held", seatHeld)
-
-		if !seatFound {
-			c.JSON(http.StatusNotFound, gin.H{
-				"error": "Seat not found",
-			})
-			return
-		}
-		if !seatHeld {
-			c.JSON(http.StatusConflict, gin.H{
-				"error": "Seat unavailable",
-			})
-			return
-		}
-
-		c.JSON(http.StatusCreated, reservation)
-	})
-
-	router.GET("/reservations/:id", func(c *gin.Context) {
-		idText := c.Param("id")
-
-		id, err := strconv.ParseUint(idText, 10, 64)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid reservation ID"})
-			return
-		}
-		mu.RLock()
-		var foundReservation Reservation
-		for _, reservation := range reservations {
-			if reservation.ID == uint(id) {
-				foundReservation = reservation
-				break
-			}
-		}
-		mu.RUnlock()
-		if foundReservation.ID != 0 {
-			c.JSON(http.StatusOK, foundReservation)
-			return
-		}
-
-		c.JSON(http.StatusNotFound, gin.H{"error": "Reservation not found"})
-	})
-
-	router.POST("/events", func(c *gin.Context) {
-		var input CreateEventRequest
-
-		if err := c.ShouldBindJSON(&input); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": "Invalid JSON",
-			})
-			return
-		}
-		if input.Name == "" {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": "Name is required",
-			})
-			return
-		}
-
-		mu.Lock()
-		newEvent := Event{
-			ID:   nextEventID,
-			Name: input.Name,
-		}
-		nextEventID++
-		events = append(events, newEvent)
-		mu.Unlock()
-		c.JSON(http.StatusCreated, newEvent)
-	})
-	router.GET("/events/:id", func(c *gin.Context) {
-		idText := c.Param("id")
-
-		id, err := strconv.ParseUint(idText, 10, 64)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": "Invalid event ID",
-			})
-			return
-		}
-		mu.RLock()
-		var foundEvent Event
-		for _, event := range events {
-			if event.ID == uint(id) {
-				foundEvent = event
-				break
-			}
-		}
-		mu.RUnlock()
-		if foundEvent.ID != 0 {
-			c.JSON(http.StatusOK, foundEvent)
-			return
-		}
-		c.JSON(http.StatusNotFound, gin.H{
-			"error": "Event not found",
-		})
-	})
-	router.POST("/events/:id/seats", func(c *gin.Context) {
-		idText := c.Param("id")
-
-		eventID, err := strconv.ParseUint(idText, 10, 64)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid event ID"})
-			return
-		}
-		mu.Lock()
-		eventFound := false
-
-		for _, event := range events {
-			if event.ID == uint(eventID) {
-				eventFound = true
-				break
-			}
-		}
-		if !eventFound {
-			mu.Unlock()
-			c.JSON(http.StatusNotFound, gin.H{"error": "Event not found"})
-			return
-		}
-		newSeat := Seat{
-			ID:      nextSeatID,
-			EventID: uint(eventID),
-			Status:  StatusAvailable,
-		}
-
-		nextSeatID++
-		seats = append(seats, newSeat)
-		mu.Unlock()
-
-		c.JSON(http.StatusCreated, newSeat)
-
-	})
-	router.GET("/events/:id/seats", func(c *gin.Context) {
-		idText := c.Param("id")
-
-		eventID, err := strconv.ParseUint(idText, 10, 64)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid event id"})
-			return
-		}
-		mu.RLock()
-		eventFound := false
-
-		for _, event := range events {
-			if event.ID == uint(eventID) {
-				eventFound = true
-				break
-			}
-		}
-		if !eventFound {
-			mu.RUnlock()
-			c.JSON(http.StatusNotFound, gin.H{"error": "Event not found"})
-			return
-		}
-		eventSeats := []Seat{}
-
-		for _, seat := range seats {
-			if seat.EventID == uint(eventID) {
-				eventSeats = append(eventSeats, seat)
-			}
-		}
-		mu.RUnlock()
-		c.JSON(http.StatusOK, eventSeats)
-	})
-
-	router.GET("/", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"message": "SeatRush api is running",
-		})
-	})
-	router.GET("/events", func(c *gin.Context) {
-		mu.RLock()
-		currentEvents := append([]Event(nil), events...)
-		mu.RUnlock()
-		c.JSON(http.StatusOK, currentEvents)
-	})
 	fmt.Println("Gin server is running on :8080")
-	router.Run(":8080")
+	if err := router.Run(":8080"); err != nil {
+		panic(err)
+	}
 }
