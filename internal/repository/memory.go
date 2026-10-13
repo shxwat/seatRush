@@ -36,9 +36,6 @@ func NewMemoryRepository(
 	}
 }
 
-// HoldSeat checks availability and creates the hold under the same lock.
-// A false result means the seat does not exist in the requested event.
-// A true result with a zero reservation ID means the seat is unavailable.
 func (r *MemoryRepository) HoldSeat(
 	userID uint,
 	eventID uint,
