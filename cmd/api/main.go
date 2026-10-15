@@ -1,14 +1,38 @@
 package main
 
 import (
+	"database/sql"
+	"fmt"
 	"seatrush/internal/app"
 	"seatrush/internal/domain"
 	"seatrush/internal/handler"
 	"seatrush/internal/repository"
 	"seatrush/internal/service"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 func main() {
+	db, err := sql.Open(
+		"pgx",
+		"host=/tmp user=shashwat dbname=seatrush sslmode=disable",
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	if err := db.Ping(); err != nil {
+		panic(err)
+	}
+	pgRepo := repository.NewPostgresRepository(db)
+
+	postgresEvents, err := pgRepo.ListEvents()
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("Event list", postgresEvents)
+
+	defer db.Close()
 	events := []domain.Event{
 		{ID: 101, Name: "Tech Conference"},
 	}
